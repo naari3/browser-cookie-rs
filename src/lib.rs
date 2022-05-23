@@ -6,15 +6,17 @@ use std::{
     ptr::null_mut,
 };
 
-use aes_gcm::{AeadInPlace, Aes256Gcm, Key, Nonce, Tag};
+use aes_gcm::{Aes256Gcm, Key, Nonce};
+use cookie::Cookie;
+use cookie_store::CookieStore;
 use rusqlite::{params, Connection};
 use serde_json::Value;
 use thiserror::Error;
+use url::Url;
 use valq::query_value;
 use windows::{
     core::PWSTR,
     Win32::{
-        self,
         Foundation::{GetLastError, WIN32_ERROR},
         Security::Cryptography::CRYPTPROTECT_UI_FORBIDDEN,
     },
@@ -55,6 +57,8 @@ pub enum Error {
     Aes(#[from] aes_gcm::Error),
     #[error("win32")]
     Win32(#[from] Win32Error),
+    #[error("cookie_store")]
+    CookieStore(#[from] cookie_store::Error),
 }
 
 fn dpapi_decrypt(encrypted: &mut [u8]) -> Result<Vec<u8>, Error> {
@@ -65,7 +69,7 @@ fn dpapi_decrypt(encrypted: &mut [u8]) -> Result<Vec<u8>, Error> {
         pbData: encrypted.as_mut_ptr(),
     };
     let mut blobout = CRYPTOAPI_BLOB::default();
-    let desc = PWSTR::default();
+    let _desc = PWSTR::default();
     unsafe {
         let result = windows::Win32::Security::Cryptography::CryptUnprotectData(
             &blobin,
@@ -92,6 +96,7 @@ pub struct CookieRecord {
     host_key: String,
     path: String,
     is_secure: bool,
+    #[allow(dead_code)]
     expires_utc: usize,
     name: String,
     value: String,
@@ -101,9 +106,12 @@ pub struct CookieRecord {
 
 #[derive(Debug)]
 pub struct ChromiumBase {
+    #[allow(dead_code)]
     salt: Vec<u8>,
+    #[allow(dead_code)]
     iv: Vec<u8>,
     key: Vec<u8>,
+    #[allow(dead_code)]
     length: usize,
     cookie_file_path: PathBuf,
     domain_name: String,
@@ -132,7 +140,7 @@ impl ChromiumBase {
         })
     }
 
-    pub fn load(&mut self) -> Result<(), Error> {
+    pub fn load(&mut self) -> Result<CookieStore, Error> {
         let conn = Connection::open(self.cookie_file_path.clone())?;
         let sql = "SELECT host_key, path, is_secure, expires_utc, name, value, encrypted_value, is_httponly
                 FROM cookies WHERE host_key like ?;";
@@ -157,16 +165,33 @@ impl ChromiumBase {
             })
         })?;
 
-        for cookie_record in cookie_iter {
-            let mut cookie = cookie_record?;
-            if cookie.value == "" {
-                cookie.value =
-                    String::from_utf8(self.decrypt(&mut cookie.encrypted_value[..])?).unwrap();
-            }
-            println!("{:x?}", cookie);
-        }
+        let cookies = cookie_iter
+            .filter_map(|cookie_record| cookie_record.ok())
+            .filter_map(|mut cookie_record| {
+                if cookie_record.value == "" {
+                    cookie_record.value = String::from_utf8(
+                        self.decrypt(&mut cookie_record.encrypted_value[..])
+                            .unwrap(),
+                    )
+                    .unwrap();
+                }
+                let raw_cookie = Cookie::build(cookie_record.name, cookie_record.value)
+                    .domain(cookie_record.host_key.clone())
+                    .path(cookie_record.path)
+                    .secure(cookie_record.is_secure)
+                    .http_only(cookie_record.is_httponly)
+                    .finish();
 
-        Ok(())
+                let pseudo_url = format!("http://{}", cookie_record.host_key);
+                let cookie = cookie_store::Cookie::try_from_raw_cookie(
+                    &raw_cookie,
+                    &Url::parse(&pseudo_url).unwrap(),
+                );
+
+                Some(cookie)
+            });
+        let cookie_store = CookieStore::from_cookies(cookies, true).unwrap();
+        Ok(cookie_store)
     }
 
     fn decrypt(&mut self, encrypted_value: &mut [u8]) -> Result<Vec<u8>, Error> {
@@ -246,8 +271,8 @@ impl Chrome {
         }
     }
 
-    pub fn load(&mut self) {
-        self.base.load();
+    pub fn load(&mut self) -> Result<CookieStore, Error> {
+        self.base.load()
     }
 }
 

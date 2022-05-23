@@ -178,6 +178,7 @@ impl ChromiumBase {
             },
         )?;
 
+        let mut cookie_store = CookieStore::default();
         let cookies = cookie_iter
             .filter_map(|cookie_record| cookie_record.ok())
             .filter_map(|mut cookie_record| {
@@ -195,15 +196,16 @@ impl ChromiumBase {
                     .http_only(cookie_record.is_httponly)
                     .finish();
 
-                let pseudo_url = format!("http://{}", cookie_record.host_key);
-                let cookie = cookie_store::Cookie::try_from_raw_cookie(
-                    &raw_cookie,
-                    &Url::parse(&pseudo_url).unwrap(),
-                );
+                let pseudo_url = Url::parse(&format!("http://{}", cookie_record.host_key)).unwrap();
 
-                Some(cookie)
+                let cookie = cookie_store::Cookie::try_from_raw_cookie(&raw_cookie, &pseudo_url);
+
+                Some((cookie, pseudo_url))
             });
-        let cookie_store = CookieStore::from_cookies(cookies, false).unwrap();
+        for (cookie, reqest_url) in cookies {
+            cookie_store.insert(cookie.unwrap(), &reqest_url).unwrap();
+        }
+        // let cookie_store = CookieStore::from_cookies(cookies, false).unwrap();
         Ok(cookie_store)
     }
 

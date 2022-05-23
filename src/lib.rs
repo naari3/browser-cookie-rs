@@ -4,6 +4,7 @@ use std::{
     io::BufReader,
     path::{Path, PathBuf},
     ptr::null_mut,
+    time::Instant,
 };
 
 use aes_gcm::{Aes256Gcm, Key, Nonce};
@@ -97,7 +98,7 @@ pub struct CookieRecord {
     path: String,
     is_secure: bool,
     #[allow(dead_code)]
-    expires_utc: usize,
+    expires_utc: Option<usize>,
     name: String,
     value: String,
     encrypted_value: Vec<u8>,
@@ -145,25 +146,37 @@ impl ChromiumBase {
         let sql = "SELECT host_key, path, is_secure, expires_utc, name, value, encrypted_value, is_httponly
                 FROM cookies WHERE host_key like ?;";
         let mut stmt = conn.prepare(sql)?;
-        let cookie_iter = stmt.query_map(params![format!("%{}%", self.domain_name)], |row| {
-            use rusqlite::types::ValueRef::*;
-            Ok(CookieRecord {
-                host_key: row.get(0)?,
-                path: row.get(1)?,
-                is_secure: row.get(2)?,
-                expires_utc: row.get(3)?,
-                name: row.get(4)?,
-                value: row.get(5)?,
-                encrypted_value: match row.get_ref_unwrap(6) {
-                    Text(blob) => blob.to_vec(),
-                    Null => todo!(),
-                    Integer(_) => todo!(),
-                    Real(_) => todo!(),
-                    Blob(blob) => blob.to_vec(),
-                },
-                is_httponly: row.get(7)?,
-            })
-        })?;
+        let cookie_iter = stmt.query_map(
+            params![format!("%{}%", self.domain_name)],
+            |row| -> Result<CookieRecord, rusqlite::Error> {
+                use rusqlite::types::ValueRef::*;
+                Ok(CookieRecord {
+                    host_key: row.get(0)?,
+                    path: row.get(1)?,
+                    is_secure: row.get(2)?,
+                    expires_utc: match row.get_ref_unwrap(3) {
+                        Null => todo!(),
+                        Integer(x) => match x {
+                            0 => None,
+                            x => Some((x as usize / 1000000) - 11644473600),
+                        },
+                        Real(_) => todo!(),
+                        Text(_) => todo!(),
+                        Blob(_) => todo!(),
+                    },
+                    name: row.get(4)?,
+                    value: row.get(5)?,
+                    encrypted_value: match row.get_ref_unwrap(6) {
+                        Text(blob) => blob.to_vec(),
+                        Null => todo!(),
+                        Integer(_) => todo!(),
+                        Real(_) => todo!(),
+                        Blob(blob) => blob.to_vec(),
+                    },
+                    is_httponly: row.get(7)?,
+                })
+            },
+        )?;
 
         let cookies = cookie_iter
             .filter_map(|cookie_record| cookie_record.ok())
@@ -190,7 +203,7 @@ impl ChromiumBase {
 
                 Some(cookie)
             });
-        let cookie_store = CookieStore::from_cookies(cookies, true).unwrap();
+        let cookie_store = CookieStore::from_cookies(cookies, false).unwrap();
         Ok(cookie_store)
     }
 

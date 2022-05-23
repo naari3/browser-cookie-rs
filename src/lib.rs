@@ -4,7 +4,6 @@ use std::{
     io::BufReader,
     path::{Path, PathBuf},
     ptr::null_mut,
-    time::Instant,
 };
 
 use aes_gcm::{Aes256Gcm, Key, Nonce};
@@ -189,8 +188,12 @@ impl ChromiumBase {
                     )
                     .unwrap();
                 }
+                let mut domain = cookie_record.host_key.clone();
+                if domain.starts_with(".") {
+                    domain = domain[1..].to_string();
+                }
                 let raw_cookie = Cookie::build(cookie_record.name, cookie_record.value)
-                    .domain(cookie_record.host_key.clone())
+                    .domain(domain)
                     .path(cookie_record.path)
                     .secure(cookie_record.is_secure)
                     .http_only(cookie_record.is_httponly)
